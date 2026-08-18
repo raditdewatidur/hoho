@@ -3936,10 +3936,11 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ---------- tarik katalog ---------- */
-  function tarikKatalog(diam) {
+  function tarikKatalog(diam, opsiTarik) {
     if (!siap()) return Promise.resolve(null);
-    return metaAmbil("sejakProduk").then(function (sejak) {
-      return panggilUlang({ aksi: "tarik", sejak: sejak || "" });
+    var paksa = !!(opsiTarik && opsiTarik.paksa);
+    return (paksa ? Promise.resolve("") : metaAmbil("sejakProduk")).then(function (sejak) {
+      return panggilUlang({ aksi: "tarik", sejak: paksa ? "" : (sejak || "") });
     }).then(function (j) {
       var terbaru = "";
       (j.produk || []).forEach(function (p) { if (String(p.diubah) > terbaru) terbaru = String(p.diubah); });
@@ -3948,13 +3949,15 @@ window.addEventListener("DOMContentLoaded", () => {
       return hitungAntre().then(function (n) {
         var bolehAdopsiStok = cfg().adopsiStok && n.total === 0;   // hanya kalau tidak ada mutasi tertunda
         if (typeof SINKRON.padaKatalogMasuk === "function") {
-          SINKRON.padaKatalogMasuk(j.produk || [], j.dihapus || [], { bolehAdopsiStok: bolehAdopsiStok });
+          SINKRON.padaKatalogMasuk(j.produk || [], j.dihapus || [],
+            { bolehAdopsiStok: bolehAdopsiStok, paksa: paksa });
         }
         if (terbaru) return metaSimpan("sejakProduk", terbaru).then(function () { return j; });
         return j;
       });
     }).then(function (j) {
-      if (!diam) tandai("ok", "Katalog ditarik: " + ((j.produk || []).length) + " barang");
+      if (!diam) tandai("ok", (paksa ? "Katalog ditarik ulang dari nol: " : "Katalog ditarik: ") +
+        ((j.produk || []).length) + " barang");
       return j;
     }).catch(function (e) {
       if (!diam) tandai("gagal", "Tarik katalog gagal: " + e.message);
@@ -4008,6 +4011,8 @@ window.addEventListener("DOMContentLoaded", () => {
           '<button id="skSimpan" type="button">Simpan</button>' +
           '<button id="skUji" type="button">Uji sambungan</button>' +
           '<button id="skTarik" type="button">Tarik katalog</button>' +
+          '<button id="skKatalog" type="button">Kirim seluruh katalog</button>' +
+          '<button id="skTarikUlang" type="button">Tarik ulang dari nol</button>' +
           '<button id="skKirim" type="button">Kirim sekarang</button>' +
         '</div>' +
       "</div>";
@@ -4029,6 +4034,24 @@ window.addEventListener("DOMContentLoaded", () => {
         .catch(function (e) { tandai("gagal", "Gagal: " + e.message); });
     };
     el.querySelector("#skTarik").onclick = function () { tarikKatalog(false); };
+    el.querySelector("#skTarikUlang").onclick = function () {
+      hitungAntre().then(function (n) {
+        var peringatan = "Seluruh katalog akan diambil ulang dari Google Sheet dan menimpa data barang di HP ini" +
+          (n.total ? ".\n\nPERHATIAN: masih ada " + n.total + " baris yang belum terkirim. Sebaiknya tekan " +
+            "\"Kirim sekarang\" dulu supaya perubahanmu tidak tertimpa." : ".") +
+          "\n\nLanjutkan?";
+        if (!global.confirm(peringatan)) return;
+        tandai("jalan", "Menarik ulang seluruh katalog…");
+        tarikKatalog(false, { paksa: true });
+      });
+    };
+    el.querySelector("#skKatalog").onclick = function () {
+      if (typeof global.sinkronKirimSemuaProduk !== "function") {
+        tandai("gagal", "Jembatan katalog belum terpasang"); return;
+      }
+      var n = global.sinkronKirimSemuaProduk();
+      tandai("jalan", n + " barang dimasukkan ke antrean, sedang dikirim…");
+    };
     el.querySelector("#skKirim").onclick = function () { kirimSekarang(false); };
 
     var kotak = el.querySelector("#skStatus");
@@ -4204,7 +4227,23 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   };
 
-  /* ---------- 6. barang yang belum ada di Sheet ---------- */
+  /* ---------- 6. kirim seluruh katalog sekaligus ---------- */
+  window.sinkronKirimSemuaProduk = function () {
+    if (typeof DB === "undefined" || !DB || !Array.isArray(DB.produk)) {
+      if (typeof toast === "function") toast("Data barang belum siap — masuk dulu ke aplikasi", "err");
+      return 0;
+    }
+    var n = 0;
+    DB.produk.forEach(function (p) {
+      if (!p.diubah) p.diubah = new Date().toISOString();   // barang lama yang belum punya penanda
+      window.sinkronCatatProduk(p); n++;
+    });
+    if (typeof simpan === "function") simpan(true);
+    SINKRON.kirimSekarang(false);
+    return n;
+  };
+
+  /* ---------- 7. barang yang belum ada di Sheet ---------- */
   window.SINKRON.padaSkuAsing = function (daftarSku) {
     if (typeof DB === "undefined" || !DB || !Array.isArray(DB.produk)) return;
     daftarSku.forEach(function (sku) {
@@ -4214,7 +4253,7 @@ window.addEventListener("DOMContentLoaded", () => {
     SINKRON.kirimSekarang(true);
   };
 
-  /* ---------- 7. katalog masuk dari Sheet ---------- */
+  /* ---------- 8. katalog masuk dari Sheet ---------- */
   window.SINKRON.padaKatalogMasuk = function (daftar, dihapus, opsi) {
     if (typeof DB === "undefined" || !DB || !Array.isArray(DB.produk)) return;
     var berubah = 0;
@@ -4236,7 +4275,7 @@ window.addEventListener("DOMContentLoaded", () => {
         berubah++;
         return;
       }
-      if (diubah <= String(p.diubah || "")) return;      // punya kita lebih baru
+      if (!(opsi && opsi.paksa) && diubah <= String(p.diubah || "")) return;   // punya kita lebih baru
       p.nama = String(r.nama || p.nama);
       p.barcode = String(r.barcode || p.barcode);
       p.kategori = String(r.kategori || "");
@@ -4253,6 +4292,17 @@ window.addEventListener("DOMContentLoaded", () => {
       if (opsi && opsi.bolehAdopsiStok && r.stok !== "" && r.stok !== undefined) p.stok = Number(r.stok) || 0;
       berubah++;
     });
+
+    /* pada tarik ulang penuh, barang yang tidak ada lagi di Sheet ditandai hapus
+       supaya isi HP benar-benar sama dengan Sheet */
+    if (opsi && opsi.paksa) {
+      var adaDiSheet = {};
+      daftar.forEach(function (r) { adaDiSheet[String(r.sku || r.id)] = true; });
+      (dihapus || []).forEach(function (r) { adaDiSheet[String(r.sku || r.id)] = true; });
+      DB.produk.forEach(function (p) {
+        if (!adaDiSheet[String(p.id)] && !p.dihapus) { p.dihapus = true; p.aktif = false; berubah++; }
+      });
+    }
 
     (dihapus || []).forEach(function (r) {
       var sku = String(r.sku || r.id);
