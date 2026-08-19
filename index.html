@@ -735,20 +735,46 @@ async function prosesMasuk(){
   if (orang.aktif === false) { err.textContent = "Akun ini dinonaktifkan. Hubungi admin."; err.classList.remove("hidden"); return; }
   err.classList.add("hidden");
   SESI = { username: orang.username, nama: orang.nama, peran: orang.peran };
-  try { sessionStorage.setItem(LS_SESSION, JSON.stringify(SESI)); } catch(e){}
+  try { localStorage.setItem(LS_SESSION, JSON.stringify(SESI)); } catch(e){}
   mulaiApp();
 }
 
 function keluar(){
   konfirmasi("Keluar", "Keranjang yang belum dibayar akan hilang. Keluar sekarang?", () => {
     SESI = null; KERANJANG = [];
-    try { sessionStorage.removeItem(LS_SESSION); } catch(e){}
+    try { localStorage.removeItem(LS_SESSION); } catch(e){}
     $("#app").classList.add("hidden"); $("#login").classList.remove("hidden");
     $("#lgPass").value = "";
   }, "Keluar");
 }
 
 function bolehAdmin(){ return SESI && SESI.peran === "admin"; }
+
+/* Menggambar ulang halaman yang sedang dibuka, dipakai setelah data
+   berubah banyak sekaligus (misalnya sesudah pemulihan dari Sheet). */
+function segarkanSemua(){
+  if (!SESI) return;
+  if (TAB === "kasir") gambarKasir();
+  else if (TAB === "kas") gambarKas();
+  else if (TAB === "produk") gambarProduk();
+  else if (TAB === "opname") gambarOpname();
+  else if (TAB === "laporan") gambarLaporan();
+  else if (TAB === "masuk") gambarMasuk();
+}
+
+/* Memulihkan sesi setelah halaman dimuat ulang, supaya kasir tidak
+   perlu masuk lagi tiap kali browser disegarkan. */
+function pulihkanSesi(){
+  if (!DB) return false;
+  let simpanan = null;
+  try { simpanan = JSON.parse(localStorage.getItem(LS_SESSION) || "null"); } catch(e){}
+  if (!simpanan || !simpanan.username) return false;
+  const orang = DB.pengguna.find(x => String(x.username).toLowerCase() === String(simpanan.username).toLowerCase());
+  if (!orang || orang.aktif === false) { try { localStorage.removeItem(LS_SESSION); } catch(e){} return false; }
+  SESI = { username: orang.username, nama: orang.nama, peran: orang.peran };
+  mulaiApp();
+  return true;
+}
 
 /* ============================================================
    NAVIGASI
@@ -811,9 +837,10 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("#hOut").onclick = keluar;
   $$("#tabs button").forEach(b => b.onclick = () => bukaTab(b.dataset.v));
 
-  window.addEventListener("beforeunload", e => {
-    if (BELUM_TERSIMPAN && SESI) { e.preventDefault(); e.returnValue = ""; }
-  });
+  /* Tidak ada lagi peringatan saat halaman ditutup: data kasir langsung
+     tersimpan di perangkat, dan antrean kiriman tersimpan di IndexedDB. */
+
+  pulihkanSesi();          // setelah semua tombol terpasang
 });
 
 function setelanServerModal(){
@@ -2811,6 +2838,7 @@ function selesaikanOpname(o){
           if (selisih) catatGerak(p.id, "opname", selisih, o.nomor, "penyesuaian hasil opname");
         });
         o.status = "selesai"; o.selesai = new Date().toISOString(); o.ringkas = ringkasOpname(o); tandaiUbah(o);
+        if (window.sinkronCatatOpname) sinkronCatatOpname(o);
         simpan(true); gambarOpname();
         toast("Opname selesai, stok disesuaikan", "ok");
       } }
@@ -3895,7 +3923,7 @@ window.addEventListener("DOMContentLoaded", () => {
       if (!n.total) { tandai("ok", "Tidak ada yang perlu dikirim"); return null; }
 
       var potong = n.isi.slice(0, MAKS_PER_KIRIM);
-      var data = { transaksi: [], item: [], shift: [], mutasi: [], produk: [] };
+      var data = { transaksi: [], item: [], shift: [], mutasi: [], produk: [], opname: [], opnameitem: [] };
       potong.forEach(function (r) {
         if (!data[r.tipe]) data[r.tipe] = [];
         data[r.tipe].push(r.data);
@@ -4013,6 +4041,7 @@ window.addEventListener("DOMContentLoaded", () => {
           '<button id="skTarik" type="button">Tarik katalog</button>' +
           '<button id="skKatalog" type="button">Kirim seluruh katalog</button>' +
           '<button id="skTarikUlang" type="button">Tarik ulang dari nol</button>' +
+          '<button id="skPulih" type="button">Pulihkan semua data</button>' +
           '<button id="skKirim" type="button">Kirim sekarang</button>' +
         '</div>' +
       "</div>";
@@ -4043,6 +4072,24 @@ window.addEventListener("DOMContentLoaded", () => {
         if (!global.confirm(peringatan)) return;
         tandai("jalan", "Menarik ulang seluruh katalog…");
         tarikKatalog(false, { paksa: true });
+      });
+    };
+    el.querySelector("#skPulih").onclick = function () {
+      if (typeof global.sinkronPulihkanSemua !== "function") {
+        tandai("gagal", "Jembatan pemulihan belum terpasang"); return;
+      }
+      hitungAntre().then(function (n) {
+        var pesan = "Seluruh isi Spreadsheet akan diambil: barang, riwayat transaksi, retur, kartu stok, " +
+          "shift, dan stok opname. Angka stok mengikuti Sheet." +
+          (n.total ? "\n\nPERHATIAN: masih ada " + n.total + " baris belum terkirim. Tekan \"Kirim sekarang\" dulu." : "") +
+          "\n\nLanjutkan?";
+        if (!global.confirm(pesan)) return;
+        tandai("jalan", "Memulihkan data…");
+        global.sinkronPulihkanSemua("").then(function (l) {
+          if (!l) return;
+          tandai("ok", "Pulih: " + l.produk + " barang, " + l.transaksi + " transaksi, " +
+            l.retur + " retur, " + l.gerak + " kartu stok, " + l.shift + " shift, " + l.opname + " opname");
+        });
       });
     };
     el.querySelector("#skKatalog").onclick = function () {
@@ -4097,9 +4144,19 @@ window.addEventListener("DOMContentLoaded", () => {
     antreMutasi:    function (baris)  { return antre("mutasi", baris); },
     antreShift:     function (baris)  { return antre("shift", baris); },
     antreProduk:    function (baris)  { return antre("produk", baris); },
+    antreOpname:     function (baris) { return antre("opname", baris); },
+    antreOpnameItem: function (baris) { return antre("opnameitem", baris); },
 
     kirimSekarang: kirimSekarang,
     tarikKatalog: tarikKatalog,
+    /* mengambil seluruh isi Spreadsheet untuk membangun ulang perangkat */
+    mintaPulih: function (dari) {
+      if (!siap()) { tandai("gagal", "URL atau token belum diisi"); return Promise.resolve(null); }
+      tandai("jalan", "Mengambil seluruh data dari Sheet…");
+      return panggilUlang({ aksi: "pulih", dari: dari || "" })
+        .then(function (j) { return j; })
+        .catch(function (e) { tandai("gagal", "Pemulihan gagal: " + e.message); return null; });
+    },
     panel: panel,
     status: function () { return Object.assign({}, status); },
     padaStatus: function (f) { pendengar.push(f); f(status); },
@@ -4227,7 +4284,31 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   };
 
-  /* ---------- 6. kirim seluruh katalog sekaligus ---------- */
+  /* ---------- 6. sesi stok opname selesai ---------- */
+  window.sinkronCatatOpname = function (o) {
+    if (!window.SINKRON || !o) return;
+    var r = (typeof ringkasOpname === "function") ? ringkasOpname(o) : { dicek: 0, total: 0, lebih: 0, kurang: 0, nilai: 0 };
+    SINKRON.antreOpname({
+      id: o.id, nomor: o.nomor, mulai: o.mulai, selesai: o.selesai || "",
+      oleh: o.oleh, status: o.status, catatan: o.catatan || "",
+      jumlah_dicek: r.dicek, jumlah_barang: r.total,
+      selisih_unit: r.lebih - r.kurang, selisih_nilai: r.nilai,
+      perlakuan_sisa: o.perlakuanSisa || ""
+    });
+    (o.items || []).forEach(function (i) {
+      if (i.fisik === null || i.fisik === "") return;       // yang tidak dihitung tidak perlu dikirim
+      SINKRON.antreOpnameItem({
+        id: o.id + "-" + i.id, opname_id: o.id, sku: i.id, nama: i.nama,
+        stok_sistem: i.sistem, stok_fisik: Number(i.fisik),
+        selisih: Number(i.fisik) - i.sistem, modal: i.modalBaru != null ? i.modalBaru : i.modal,
+        waktu_hitung: i.terakhir || "", kali_hitung: i.kali || 0,
+        cara: i.auto ? "disamakan" : "dihitung"
+      });
+    });
+    SINKRON.kirimSekarang(true);
+  };
+
+  /* ---------- 7. kirim seluruh katalog sekaligus ---------- */
   window.sinkronKirimSemuaProduk = function () {
     if (typeof DB === "undefined" || !DB || !Array.isArray(DB.produk)) {
       if (typeof toast === "function") toast("Data barang belum siap — masuk dulu ke aplikasi", "err");
@@ -4243,7 +4324,7 @@ window.addEventListener("DOMContentLoaded", () => {
     return n;
   };
 
-  /* ---------- 7. barang yang belum ada di Sheet ---------- */
+  /* ---------- 8. barang yang belum ada di Sheet ---------- */
   window.SINKRON.padaSkuAsing = function (daftarSku) {
     if (typeof DB === "undefined" || !DB || !Array.isArray(DB.produk)) return;
     daftarSku.forEach(function (sku) {
@@ -4253,7 +4334,164 @@ window.addEventListener("DOMContentLoaded", () => {
     SINKRON.kirimSekarang(true);
   };
 
-  /* ---------- 8. katalog masuk dari Sheet ---------- */
+  /* ---------- 9. memulihkan seluruh isi perangkat dari Sheet ---------- */
+  window.sinkronPulihkanSemua = function (dari) {
+    if (!window.SINKRON) return Promise.resolve(null);
+    if (typeof DB === "undefined" || !DB) return Promise.resolve(null);
+    return SINKRON.mintaPulih(dari || "").then(function (j) {
+      if (!j) return null;
+      var adminkah = (typeof bolehAdmin === "function") ? bolehAdmin() : true;
+      var akuSiapa = (typeof SESI !== "undefined" && SESI) ? String(SESI.username) : "";
+      var lapor = { produk: 0, transaksi: 0, retur: 0, gerak: 0, shift: 0, opname: 0 };
+
+      /* --- katalog: Sheet yang menentukan, termasuk angka stoknya --- */
+      var petaProduk = {};
+      DB.produk.forEach(function (p) { petaProduk[String(p.id)] = p; });
+      var adaDiSheet = {};
+      (j.produk || []).forEach(function (r) {
+        var sku = String(r.sku || r.id); adaDiSheet[sku] = true;
+        var p = petaProduk[sku];
+        var isi = {
+          id: sku, barcode: String(r.barcode || ""), nama: String(r.nama || sku),
+          kategori: String(r.kategori || ""), satuan: String(r.satuan || "pcs"),
+          modal: Number(r.modal) || 0, harga: Number(r.harga_1) || 0,
+          stok: Number(r.stok) || 0, stokMin: Number(r.stok_min) || 0,
+          aktif: String(r.aktif) !== "tidak", dihapus: false,
+          nego: String(r.nego) === "ya", hargaMin: Number(r.harga_min) || 0,
+          diubah: String(r.diubah || "")
+        };
+        if (!p) {
+          DB.produk.push(Object.assign({ barcodeCetak: "", grosir: [], tawarTambah: 0, hargaOtomatis: false }, isi));
+        } else {
+          Object.assign(p, isi);
+        }
+        lapor.produk++;
+      });
+      (j.dihapus || []).forEach(function (r) {
+        var sku = String(r.sku || r.id); adaDiSheet[sku] = true;
+        var p = petaProduk[sku];
+        if (p) { p.dihapus = true; p.aktif = false; }
+      });
+      DB.produk.forEach(function (p) {
+        if (!adaDiSheet[String(p.id)] && !p.dihapus) { p.dihapus = true; p.aktif = false; }
+      });
+
+      /* --- riwayat transaksi & retur --- */
+      var itemPerTrx = {};
+      (j.item || []).forEach(function (i) {
+        var k = String(i.transaksi_id);
+        (itemPerTrx[k] = itemPerTrx[k] || []).push(i);
+      });
+      var adaTrx = {}, adaRetur = {};
+      DB.transaksi.forEach(function (t) { adaTrx[String(t.id)] = true; });
+      DB.retur.forEach(function (r) { adaRetur[String(r.id)] = true; });
+
+      (j.transaksi || []).forEach(function (r) {
+        var id = String(r.id);
+        var brs = itemPerTrx[id] || [];
+        if (String(r.void_dari || "")) {                       // baris retur
+          if (adaRetur[id]) return;
+          DB.retur.push({
+            id: id, nomor: id, waktu: String(r.waktu), trxId: String(r.void_dari), trxNomor: String(r.void_dari),
+            oleh: String(r.kasir || ""), olehNama: String(r.kasir || ""), shiftId: String(r.shift || ""),
+            items: brs.map(function (i) {
+              return { id: String(i.sku), nama: String(i.nama), qty: Math.abs(Number(i.qty) || 0),
+                       satuan: "", nilai: Number(i.harga_satuan) || 0, modal: Number(i.modal_satuan) || 0 };
+            }),
+            total: Math.abs(Number(r.total) || 0), modal: Math.abs(Number(r.modal) || 0),
+            laba: Math.abs(Number(r.laba) || 0),
+            alasan: String(r.catatan || "").replace(/^RETUR:\s*/, ""), diubah: String(r.waktu)
+          });
+          lapor.retur++;
+          return;
+        }
+        if (adaTrx[id]) return;
+        DB.transaksi.push({
+          id: id, nomor: String(r.nomor || id), waktu: String(r.waktu),
+          kasir: String(r.kasir || ""), kasirNama: String(r.kasir || ""), shiftId: String(r.shift || ""),
+          items: brs.map(function (i) {
+            return { id: String(i.sku), nama: String(i.nama), harga: Number(i.harga_satuan) || 0,
+                     modal: Number(i.modal_satuan) || 0, qty: Number(i.qty) || 0,
+                     diskon: Number(i.diskon_item) || 0, satuan: "",
+                     nego: String(i.tingkat_harga) === "nego" };
+          }),
+          subtotal: Number(r.subtotal) || 0, diskonItem: 0, diskonTrx: Number(r.diskon) || 0,
+          total: Number(r.total) || 0, modal: Number(r.modal) || 0, laba: Number(r.laba) || 0,
+          bayar: Number(r.bayar) || 0, kembali: Number(r.kembali) || 0,
+          metode: String(r.metode_bayar || "tunai"), catatan: String(r.catatan || ""),
+          diubah: String(r.waktu), _dariSheet: true
+        });
+        lapor.transaksi++;
+      });
+
+      /* --- kartu stok --- */
+      var adaGerak = {};
+      DB.pergerakan.forEach(function (g) { adaGerak[String(g.id)] = true; });
+      (j.mutasistok || []).forEach(function (m) {
+        if (adaGerak[String(m.id)]) return;
+        var p = DB.produk.find(function (x) { return String(x.id) === String(m.sku); });
+        DB.pergerakan.push({
+          id: String(m.id), waktu: String(m.waktu), diubah: String(m.waktu), produk: String(m.sku),
+          nama: p ? p.nama : String(m.sku), jenis: String(m.sebab || "koreksi"),
+          qty: Number(m.delta) || 0, stok: p ? p.stok : 0,
+          ref: String(m.referensi_id || ""), ket: "", oleh: String(m.perangkat || "")
+        });
+        lapor.gerak++;
+      });
+      DB.pergerakan.sort(function (a, b) { return String(a.waktu) < String(b.waktu) ? -1 : 1; });
+
+      /* --- shift: kasir hanya menerima miliknya sendiri --- */
+      var adaShift = {};
+      DB.shift.forEach(function (s) { adaShift[String(s.id)] = true; });
+      (j.shift || []).forEach(function (r) {
+        if (adaShift[String(r.id)]) return;
+        if (!adminkah && String(r.kasir) !== akuSiapa) return;
+        DB.shift.push({
+          id: String(r.id), kasir: String(r.kasir), kasirNama: String(r.kasir),
+          buka: String(r.buka), tutup: String(r.tutup || ""), kasAwal: Number(r.kas_awal) || 0,
+          mutasi: [], totalJual: Number(r.total_jual) || 0, totalRetur: Number(r.total_retur) || 0,
+          kasSeharusnya: Number(r.kas_seharusnya) || 0, kasFisik: Number(r.kas_fisik) || 0,
+          selisih: Number(r.selisih) || 0, catatanTutup: String(r.catatan || ""),
+          status: String(r.tutup) ? "tutup" : "buka", diubah: String(r.buka)
+        });
+        lapor.shift++;
+      });
+
+      /* --- stok opname: kasir hanya menerima sesinya sendiri --- */
+      var itemPerOpname = {};
+      (j.opnameitem || []).forEach(function (i) {
+        var k = String(i.opname_id);
+        (itemPerOpname[k] = itemPerOpname[k] || []).push(i);
+      });
+      var adaOpname = {};
+      DB.opname.forEach(function (o) { adaOpname[String(o.id)] = true; });
+      (j.opname || []).forEach(function (r) {
+        if (adaOpname[String(r.id)]) return;
+        if (!adminkah && String(r.oleh) !== akuSiapa) return;
+        DB.opname.push({
+          id: String(r.id), nomor: String(r.nomor || r.id), mulai: String(r.mulai),
+          selesai: String(r.selesai || ""), oleh: String(r.oleh), olehNama: String(r.oleh),
+          status: String(r.status || "selesai"), catatan: String(r.catatan || ""),
+          perlakuanSisa: String(r.perlakuan_sisa || ""),
+          items: (itemPerOpname[String(r.id)] || []).map(function (i) {
+            return { id: String(i.sku), nama: String(i.nama), satuan: "",
+                     modal: Number(i.modal) || 0, sistem: Number(i.stok_sistem) || 0,
+                     fisik: Number(i.stok_fisik) || 0, kali: Number(i.kali_hitung) || 0,
+                     terakhir: String(i.waktu_hitung || ""), auto: String(i.cara) === "disamakan",
+                     modalBaru: null, tglHarga: "", ketHarga: "" };
+          }),
+          diubah: String(r.selesai || r.mulai)
+        });
+        lapor.opname++;
+      });
+
+      if (typeof simpan === "function") simpan(true);
+      if (typeof segarkanSemua === "function") segarkanSemua();
+      return lapor;
+    });
+  };
+
+  /* ---------- 10. katalog masuk dari Sheet ---------- */
   window.SINKRON.padaKatalogMasuk = function (daftar, dihapus, opsi) {
     if (typeof DB === "undefined" || !DB || !Array.isArray(DB.produk)) return;
     var berubah = 0;
