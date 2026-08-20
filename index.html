@@ -517,6 +517,10 @@ const el = (tag, attrs, html) => { const n = document.createElement(tag);
   if (html != null) n.innerHTML = html; return n; };
 
 const LS_DATA = "kasir.data", LS_CFG = "kasir.cfg", LS_SESSION = "kasir.sesi";
+const LS_PULIHKAN = "kasir.pulihkanSetelahMuat";
+/* Dinaikkan setiap kali berkas ini diperbarui. Dipakai untuk memastikan
+   peramban benar-benar memuat berkas terbaru, bukan simpanan lama. */
+const VERSI_APP = "2026.08.19-1";
 
 /* ---------- format ---------- */
 const nf = new Intl.NumberFormat("id-ID");
@@ -752,6 +756,81 @@ function bolehAdmin(){ return SESI && SESI.peran === "admin"; }
 
 /* Menggambar ulang halaman yang sedang dibuka, dipakai setelah data
    berubah banyak sekaligus (misalnya sesudah pemulihan dari Sheet). */
+/* Memuat ulang halaman sambil memaksa peramban mengambil berkas terbaru.
+   Alamatnya diberi penanda waktu supaya simpanan lama tidak dipakai. */
+function muatUlangPaksa(){
+  try { if (window.caches && caches.keys) caches.keys().then(k => k.forEach(n => caches.delete(n))); } catch(e){}
+  try {
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations)
+      navigator.serviceWorker.getRegistrations().then(r => r.forEach(x => x.unregister()));
+  } catch(e){}
+  setTimeout(() => {
+    const dasar = location.href.split("?")[0].split("#")[0];
+    location.replace(dasar + "?v=" + Date.now());
+  }, 250);
+}
+
+function hapusAntreanKiriman(){
+  return new Promise(res => {
+    try {
+      const per = indexedDB.deleteDatabase("kasirSinkron");
+      per.onsuccess = per.onerror = per.onblocked = () => res(true);
+      setTimeout(() => res(true), 1500);
+    } catch(e){ res(false); }
+  });
+}
+
+function perawatanModal(){
+  const isi = el("div");
+  isi.innerHTML =
+    '<div class="notice bl">Versi berkas yang sedang berjalan: <b class="num">' + esc(VERSI_APP) + "</b>" +
+      '<br><span class="mini">Alamat: ' + esc(location.href.split("?")[0]) + "</span></div>" +
+    '<div class="sep"></div><h3>1. Muat ulang paksa</h3>' +
+    '<p class="hint" style="margin-bottom:9px">Mengambil ulang berkas aplikasi dari server, tanpa menyentuh data. ' +
+      "Pakai ini kalau versi di atas tidak berubah padahal berkasnya sudah kamu perbarui di GitHub.</p>" +
+    '<button class="btn dark blk" id="prMuat">Muat ulang paksa</button>' +
+    '<div class="sep"></div><h3>2. Bersihkan data, lalu tarik ulang dari Sheet</h3>' +
+    '<p class="hint" style="margin-bottom:9px">Menghapus barang, transaksi, kartu stok, shift, dan opname di HP ini, ' +
+      "lalu mengambilnya kembali dari Spreadsheet setelah halaman terbuka. Pengguna, kata sandi, dan pengaturan tetap.</p>" +
+    '<label class="f"><span><input type="checkbox" id="prAntre"> Hapus juga antrean kiriman yang belum terkirim</span></label>' +
+    '<button class="btn d blk" id="prBersih">Bersihkan &amp; tarik ulang</button>' +
+    (bolehAdmin() ?
+      '<div class="sep"></div><h3>3. Kosongkan perangkat ini</h3>' +
+      '<p class="hint" style="margin-bottom:9px">Menghapus <b>semuanya</b> termasuk daftar pengguna dan pengaturan. ' +
+        "Sesudah ini kamu harus memuat berkas <b>pos_data.db</b> lagi untuk bisa masuk. Ketik <b>KOSONGKAN</b> untuk melanjutkan.</p>" +
+      '<input id="prKonfirm" placeholder="KOSONGKAN" autocapitalize="characters" spellcheck="false" style="margin-bottom:9px">' +
+      '<button class="btn d blk" id="prReset">Kosongkan perangkat</button>' : "");
+
+  const m = modal({ judul: "Perawatan aplikasi", isi: isi, tombol: [{ label: "Tutup", gaya: "p" }] });
+
+  $("#prMuat", m.el).onclick = () => { toast("Mengambil berkas terbaru…"); muatUlangPaksa(); };
+
+  $("#prBersih", m.el).onclick = () => {
+    const jugaAntre = $("#prAntre", m.el).checked;
+    konfirmasi("Bersihkan data",
+      "Data kasir di HP ini dihapus, lalu ditarik ulang dari Spreadsheet begitu halaman terbuka. Lanjutkan?", async () => {
+        if (jugaAntre) await hapusAntreanKiriman();
+        const pengguna = DB.pengguna, setelan = DB.setelan;
+        DB = lengkapi({ pengguna: pengguna, setelan: setelan });
+        simpanLokal();
+        try { localStorage.setItem(LS_PULIHKAN, "1"); } catch(e){}
+        toast("Data dibersihkan, memuat ulang…", "ok");
+        muatUlangPaksa();
+      }, "Bersihkan");
+  };
+
+  const bReset = $("#prReset", m.el);
+  if (bReset) bReset.onclick = async () => {
+    if ($("#prKonfirm", m.el).value.trim().toUpperCase() !== "KOSONGKAN") {
+      toast("Ketik KOSONGKAN untuk memastikan", "err"); return;
+    }
+    await hapusAntreanKiriman();
+    try { localStorage.removeItem(LS_DATA); localStorage.removeItem(LS_SESSION); localStorage.removeItem(LS_PULIHKAN); } catch(e){}
+    toast("Perangkat dikosongkan", "ok");
+    muatUlangPaksa();
+  };
+}
+
 function segarkanSemua(){
   if (!SESI) return;
   if (TAB === "kasir") gambarKasir();
@@ -807,7 +886,17 @@ function mulaiApp(){
   });
   tandaSync();
   bukaTab("kasir");
-  if (window.SINKRON) SINKRON.pasang();
+  if (window.SINKRON) SINKRON.pasang().then(() => {
+    let perlu = false;
+    try { perlu = localStorage.getItem(LS_PULIHKAN) === "1"; } catch(e){}
+    if (!perlu || typeof window.sinkronPulihkanSemua !== "function") return;
+    try { localStorage.removeItem(LS_PULIHKAN); } catch(e){}
+    toast("Menarik ulang data dari Spreadsheet…");
+    window.sinkronPulihkanSemua("").then(l => {
+      if (l) toast("Pulih: " + l.produk + " barang, " + l.transaksi + " transaksi", "ok");
+      else toast("Pemulihan gagal — coba tekan Pulihkan semua data di Setelan", "err");
+    });
+  });
 }
 
 /* ============================================================
@@ -3031,6 +3120,16 @@ function gambarSetelan(){
     S.lebarStruk = Number($("#stLebar", toko).value); S.footerStruk = $("#stFooter", toko).value.trim();
     S.diubah = new Date().toISOString(); S._k = 0; simpan(true); $("#hToko").textContent = S.namaToko; toast("Setelan disimpan", "ok");
   };
+
+  /* perawatan aplikasi */
+  const pr = el("div", { class: "card" });
+  pr.innerHTML = '<div class="hd"><h2>Perawatan aplikasi</h2><div class="spacer"></div>' +
+    '<span class="mini num">v' + esc(VERSI_APP) + "</span></div><div class=\"bd\">" +
+    '<p class="mini" style="margin-top:0">Kalau aplikasi terasa memakai data lama, atau berkas di GitHub sudah diperbarui ' +
+      "tetapi perubahannya belum terlihat, bersihkan dari sini.</p>" +
+    '<button class="btn blk" id="btnPerawatan" style="margin-top:10px">Bersihkan &amp; muat ulang</button></div>';
+  w.appendChild(pr);
+  $("#btnPerawatan", pr).onclick = perawatanModal;
 
   /* kamera & OCR */
   const km = el("div", { class: "card" });
