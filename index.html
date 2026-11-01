@@ -3065,8 +3065,9 @@ function gambarLaporan(){
       '<td class="r num">' + t.items.reduce((a,i) => a + i.qty, 0) + "</td>" +
       '<td class="r num">' + rp(t.total) + (totalRetur(t.id) ? ' <span class="badge rs">retur</span>' : "") +
         '</td><td class="r num">' + rp(t.laba) + "</td>" +
-      '<td class="r"><button class="btn sm">Struk</button></td>');
+      '<td class="r"><button class="btn sm">Struk</button>' + (bolehAdmin() ? ' <button class="btn sm" data-edit-modal>Edit modal</button>' : '') + '</td>');
     $("button", tr).onclick = () => strukModal(t);
+    const edit = $('[data-edit-modal]', tr); if(edit) edit.onclick = () => editModalTerbayar(t.id);
     tb.appendChild(tr);
   });
 }
@@ -4811,6 +4812,58 @@ function cocokkanManual(trxId,itemId,produkId,terapkanStok){
   DB.retur.filter(r=>r.trxId===t.id).forEach(r=>{r.items.filter(x=>x.id===i.id).forEach(x=>{x.produkId=p.id;x.barangManual=true;x.stokManualDiterapkan=!!terapkanStok;});tandaiUbah(r);});
   if(terapkanStok&&net){p.stok=Math.round((p.stok-net)*1000)/1000;tandaiUbah(p);catatGerak(p.id,'koreksi',-net,t.nomor,'Pencocokan barang manual '+i.id);}
   tandaiUbah(t);if(window.sinkronCatatPenjualan)window.sinkronCatatPenjualan(t);simpan(true);
+}
+
+
+/* Koreksi modal historis: keuangan transaksi, tanpa mengubah katalog atau stok. */
+function koreksiModalTerbayar(trxId,baris,alasan){
+  if(!bolehAdmin())throw Error('Hanya admin yang dapat mengubah modal transaksi');
+  const t=DB.transaksi.find(t=>t.id===trxId);
+  if(!t || !Array.isArray(baris) || baris.length!==t.items.length)throw Error('Transaksi berubah; buka ulang form edit modal');
+  if(!String(alasan||'').trim())throw Error('Isi alasan perubahan modal');
+  const perubahan=[];
+  baris.forEach((b,index)=>{
+    const i=t.items[index];
+    if(b.id!==i.id || Number(b.modalAwal)!==Number(i.modal))throw Error('Modal sudah berubah; buka ulang form edit modal');
+    if(!Number.isSafeInteger(b.modal)||b.modal<0||!Number.isFinite(b.modal*i.qty))throw Error('Modal harus berupa angka rupiah nol atau lebih');
+    if(b.modal!==Number(i.modal))perubahan.push({index,id:i.id,nama:i.nama,dari:Number(i.modal),ke:b.modal});
+  });
+  if(!perubahan.length)throw Error('Belum ada perubahan modal');
+  const totalModal=t.items.reduce((n,i,index)=>n+baris[index].modal*i.qty,0);
+  if(!Number.isFinite(totalModal))throw Error('Total modal terlalu besar');
+  perubahan.forEach(b=>{t.items[b.index].modal=b.ke;});
+  t.modal=totalModal;t.laba=t.total-t.modal;
+  if(!Array.isArray(t.riwayatModal))t.riwayatModal=[];
+  t.riwayatModal.push({waktu:new Date().toISOString(),oleh:SESI.username,alasan:String(alasan).trim(),perubahan});
+  // Retur yang sudah terjadi memakai modal revisi agar laba setelah retur tetap tepat.
+  DB.retur.filter(r=>r.trxId===t.id).forEach(r=>{
+    let ubah=false;
+    r.items.forEach(i=>{const b=perubahan.find(b=>b.id===i.id);if(b){i.modal=b.ke;ubah=true;}});
+    if(ubah){r.modal=r.items.reduce((n,i)=>n+i.modal*i.qty,0);r.laba=r.total-r.modal;tandaiUbah(r);if(window.sinkronCatatRetur)window.sinkronCatatRetur(r);}
+  });
+  tandaiUbah(t);if(window.sinkronCatatPenjualan)window.sinkronCatatPenjualan(t);simpan(true);
+  return t;
+}
+function editModalTerbayar(trxId){
+  if(!bolehAdmin())return;
+  const t=DB.transaksi.find(t=>t.id===trxId);if(!t)return;
+  const awal=t.items.map(i=>({id:i.id,modalAwal:Number(i.modal),modal:Number(i.modal)}));
+  const isi=el('div');
+  isi.innerHTML='<p class="hint">Ubah modal per unit pada transaksi ini. Harga jual, pembayaran, stok, dan modal di katalog tetap. Retur terkait ikut dihitung ulang.</p><div class="tw"><table><thead><tr><th>Barang</th><th>Jumlah</th><th>Harga jual</th><th>Modal lama / unit</th><th>Modal baru / unit</th></tr></thead><tbody>'+t.items.map((i,n)=>'<tr><td>'+esc(i.nama)+'</td><td>'+rp(i.qty)+'</td><td>'+rupiah(i.harga)+'</td><td>'+rupiah(i.modal)+'</td><td><input data-cost="'+n+'" aria-label="Modal baru per unit" type="number" min="0" step="1" required value="'+Number(i.modal)+'" style="width:145px"></td></tr>').join('')+'</tbody></table></div><div class="notice bl" id="ecRingkas" style="margin-top:12px"></div><label class="f"><span>Alasan perubahan (wajib)</span><input id="ecAlasan" maxlength="500" required placeholder="Contoh: modal dari nota supplier sudah diperbarui"></label><div class="mini">'+(t.riwayatModal||[]).slice(-5).reverse().map(r=>esc(tglJam(r.waktu))+' — '+esc(r.oleh)+': '+esc(r.alasan)).join('<br>')+'</div>';
+  function ringkas(){
+    const modal=t.items.reduce((n,i,index)=>n+Number(isi.querySelector('[data-cost="'+index+'"]').value)*i.qty,0);
+    $('#ecRingkas',isi).textContent='Total modal: '+rupiah(t.modal)+' → '+rupiah(modal)+' · Laba transaksi: '+rupiah(t.laba)+' → '+rupiah(t.total-modal);
+  }
+  isi.querySelectorAll('[data-cost]').forEach(input=>input.oninput=ringkas);ringkas();
+  return modal({judul:'Edit modal — '+t.nomor,isi,wide:true,tombol:[{label:'Batal'},{label:'Simpan modal & hitung laba',gaya:'p',aksi:()=>{
+    if(!bolehAdmin())return false;
+    for(const input of isi.querySelectorAll('input'))if(!input.reportValidity())return false;
+    try{
+      const baris=awal.map((b,n)=>({...b,modal:Number(isi.querySelector('[data-cost="'+n+'"]').value)}));
+      koreksiModalTerbayar(trxId,baris,$('#ecAlasan',isi).value);
+      gambarLaporan();toast('Modal dan laba transaksi sudah diperbarui','ok');
+    }catch(e){toast(e.message,'err');return false;}
+  }}]});
 }
 
 </script>
