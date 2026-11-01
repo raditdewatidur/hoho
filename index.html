@@ -971,14 +971,35 @@ let TRX_TERAKHIR = null;
 
 function shiftAktif(){ return DB.shift.find(s => s.status === "buka" && s.kasir === SESI.username) || null; }
 
+/* Semua kolom pencarian menggunakan pencocokan kata dan tipe yang sama. */
+function normalCari(v){
+  return String(v??'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('id').replace(/[^\p{L}\p{N}]+/gu,' ').trim().replace(/\s+/g,' ');
+}
+function cocokCari(p,q,ekstra=''){
+  const kata=normalCari(q).split(' ').filter(Boolean);if(!kata.length)return true;
+  const teks=normalCari([p.nama,p.id,p.barcode,p.barcodeCetak,p.kategori,ekstra].filter(v=>v!=null).join(' '));
+  const rapat=teks.replace(/ /g,'');
+  return kata.every(k=>teks.includes(k)||rapat.includes(k));
+}
+function urutCari(list,q){
+  const n=normalCari(q),rapat=n.replace(/ /g,'');
+  function skor(p){
+    if(!n)return 5;
+    if([p.id,p.barcode,p.barcodeCetak].some(v=>v!=null&&normalCari(v)===n))return 0;
+    const nama=normalCari(p.nama),nr=nama.replace(/ /g,'');
+    if(nama===n||nr===rapat)return 1;
+    if(nama.includes(n)||nr.includes(rapat))return 2;
+    if(n.split(' ').every(k=>nama.includes(k)||nr.includes(k)))return 3;
+    return 4;
+  }
+  return list.sort((a,b)=>skor(a)-skor(b)||String(a.nama).localeCompare(String(b.nama),'id')||String(a.id).localeCompare(String(b.id),'id'));
+}
+function cariItemOpname(items,q){
+  const katalog=new Map(DB.produk.map(p=>[p.id,p]));
+  return urutCari(items.filter(i=>cocokCari({...katalog.get(i.id),...i},q,katalog.get(i.id)?.nama||'')),q);
+}
 function cariBarang(q){
-  q = (q || "").trim().toLowerCase();
-  let list = DB.produk.filter(p => p.aktif !== false && !p.dihapus);
-  if (q) list = list.filter(p =>
-    String(p.nama).toLowerCase().includes(q) ||
-    String(p.id).toLowerCase().includes(q) ||
-    String(p.barcode).toLowerCase().includes(q));
-  return list.sort((a,b) => String(a.nama).localeCompare(String(b.nama))).slice(0, 60);
+  return urutCari(DB.produk.filter(p=>p.aktif!==false&&!p.dihapus&&cocokCari(p,q)),q);
 }
 function cariPersis(kode){
   kode = String(kode || "").trim();
@@ -1560,7 +1581,7 @@ document.addEventListener("keydown", e => {
 function prosesScan(kode){
   const p = cariPersis(kode);
   if (p) { tambahKeKeranjang(p.id, 1); toast(p.nama + " ditambahkan", "ok"); }
-  else { $("#scanInput").value = kode; gambarHasil(kode); toast("Kode " + kode + " tidak terdaftar", "err"); }
+  else { $("#scanInput").value = kode; gambarHasil(kode); const cocok=cariBarang(kode); toast(cocok.length ? "Ada "+cocok.length+" barang cocok, pilih dari daftar" : "Tidak ada barang yang cocok", cocok.length ? "" : "err"); }
 }
 
 /* ============================================================
@@ -2072,7 +2093,7 @@ function gambarProduk(){
 
   let list = DB.produk.filter(p => !p.dihapus);
   const q = pFilterState.q.toLowerCase();
-  if (q) list = list.filter(p => (p.nama + " " + p.id + " " + p.barcode).toLowerCase().includes(q));
+  if (q) list = urutCari(list.filter(p => cocokCari(p,q)),q);
   if (pFilterState.kat) list = list.filter(p => p.kategori === pFilterState.kat);
   if (pFilterState.mode === "low") list = list.filter(p => p.aktif !== false && p.stok <= (p.stokMin || 0));
   else if (pFilterState.mode === "zero") list = list.filter(p => p.aktif !== false && p.stok <= 0);
@@ -2748,14 +2769,14 @@ function gambarOpname(){
     tb.innerHTML = "";
     let list = o.items.slice();
     const q = opQ.toLowerCase();
-    if (q) list = list.filter(i => (i.nama + " " + i.id).toLowerCase().includes(q));
+    if (q) list = cariItemOpname(list,q);
     if (opFilter === "belum") list = list.filter(i => i.fisik === null || i.fisik === "");
     else if (opFilter === "sudah") {
       list = list.filter(i => i.fisik !== null && i.fisik !== "");
       list.sort((a,b) => new Date(b.terakhir || 0) - new Date(a.terakhir || 0));
     }
     if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Tidak ada baris yang cocok.</td></tr>'; return; }
-    list.slice(0, 400).forEach(i => {
+    list.forEach(i => {
       const st = statusItem(i);
       const d = st.ada ? Number(i.fisik) - i.sistem : 0;
       const mEfektif = modalEfektif(i);
@@ -2781,7 +2802,7 @@ function gambarOpname(){
       if (bh) bh.onclick = () => hargaOpnameModal(o, i);
       tb.appendChild(tr);
     });
-    if (list.length > 400) tb.appendChild(el("tr", null, '<td colspan="6" class="mini" style="padding:10px">Menampilkan 400 baris pertama. Pakai kotak saring untuk mempersempit.</td>'));
+
   }
   isiBaris();
 
@@ -2810,11 +2831,9 @@ function gambarOpname(){
   function tampilSaran(q){
     saran.innerHTML = "";
     if (!q) return;
-    const qq = q.toLowerCase();
-    const list = o.items.filter(i => {
-      const p = DB.produk.find(x => x.id === i.id);
-      return (i.nama + " " + i.id + " " + (p ? p.barcode + " " + (p.barcodeCetak || "") : "")).toLowerCase().includes(qq);
-    }).slice(0, 8);
+    const list = cariItemOpname(o.items,q);
+    saran.style.maxHeight='360px';saran.style.overflowY='auto';
+    saran.appendChild(el('div',{class:'mini',style:'padding:8px 2px'},list.length+' barang cocok — gulir untuk melihat semuanya'));
     if (!list.length) { saran.innerHTML = '<div class="mini" style="padding:9px 2px">Tidak ada barang cocok di sesi ini.</div>'; return; }
     list.forEach(i => {
       const st = statusItem(i);
@@ -2851,7 +2870,7 @@ function gambarOpname(){
     const p = cariPersis(kode) || DB.produk.find(x => String(x.id).toLowerCase() === kode.toLowerCase());
     let it = p ? o.items.find(i => i.id === p.id) : null;
     if (!it) {
-      const cocok = o.items.filter(i => (i.nama + " " + i.id).toLowerCase().includes(kode.toLowerCase()));
+      const cocok = cariItemOpname(o.items,kode);
       if (cocok.length === 1) it = cocok[0];
       else {
         sc.value = kode; tampilSaran(kode);
@@ -3563,7 +3582,9 @@ function gambarMasuk(){
   function tampilSaran(q){
     saran.innerHTML = "";
     if (!q) return;
-    const list = cariBarang(q).slice(0, 8);
+    const list = cariBarang(q);
+    saran.style.maxHeight='360px';saran.style.overflowY='auto';
+    saran.appendChild(el('div',{class:'mini',style:'padding:8px 2px'},list.length+' barang cocok — gulir untuk melihat semuanya'));
     if (!list.length) { saran.innerHTML = '<div class="mini" style="padding:8px 2px">Tidak ada barang cocok. Tambahkan dulu lewat menu Barang.</div>'; return; }
     list.forEach(p => {
       const b = el("button", { class: "pitem", type: "button" },
@@ -3758,8 +3779,8 @@ function labelModal(){
   function isiTabel(q){
     tb.innerHTML = "";
     const list = DB.produk.filter(p => p.aktif !== false && !p.dihapus &&
-      (!q || (p.nama + " " + p.id + " " + p.barcode).toLowerCase().includes(q.toLowerCase())))
-      .sort((a,b) => String(a.nama).localeCompare(String(b.nama))).slice(0, 200);
+      cocokCari(p,q))
+      .sort((a,b) => String(a.nama).localeCompare(String(b.nama)));
     if (!list.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">Tidak ada barang cocok.</td></tr>'; return; }
     list.forEach(p => {
       const tr = el("tr", null,
@@ -4725,7 +4746,7 @@ function barisBelanja(){
   const list=daftarBelanja().filter(x=> {
     const p=x.p;
     return (belanjaFilter==='semua' || (belanjaFilter==='dipilih' ? x.qty>0 : belanjaFilter==='tipis' ? Number(p.stok)<=Number(p.stokMin||0) : Number(p.stok)<=0)) &&
-      (!q || [p.nama,p.id,p.barcode].join(' ').toLocaleLowerCase('id').includes(q));
+      cocokCari(p,q);
   }).sort(bandingBelanja);
   document.querySelectorAll('#v-belanja button[data-bsort]').forEach(button => {
     const aktif=button.dataset.bsort===belanjaSort;
@@ -4794,7 +4815,7 @@ function cocokManualModal(trxId,itemId){
   if(!bolehAdmin())return;
   const t=DB.transaksi.find(t=>t.id===trxId),i=t?.items.find(i=>i.id===itemId);if(!i||i.produkId)return;
   const isi=el('div');isi.innerHTML='<p><b>'+esc(i.nama)+'</b> — '+rp(i.qty)+' pcs</p><label class="f"><span>Cari barang tujuan (nama / kode / barcode)</span><input id="cmCari"></label><label class="f"><span>Barang katalog</span><select id="cmProduk"></select></label><label class="f"><span><input type="checkbox" id="cmStok" checked> Kurangi stok barang tujuan untuk jumlah terjual yang belum diretur</span></label><p class="hint">Matikan jika stok katalog sudah disesuaikan untuk penjualan ini. Riwayat nama awal dan admin yang mencocokkan tetap disimpan. Jika barang belum tersedia, tambahkan dahulu lewat tab Barang.</p>';
-  function opsi(){const q=$('#cmCari',isi).value.trim().toLowerCase();const list=DB.produk.filter(p=>!p.dihapus&&p.aktif!==false&&[p.nama,p.id,p.barcode].join(' ').toLowerCase().includes(q));$('#cmProduk',isi).innerHTML='<option value="">Pilih barang yang sesuai</option>'+list.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.nama)+' ('+esc(p.id)+') — stok '+rp(p.stok)+'</option>').join('');}
+  function opsi(){const q=$('#cmCari',isi).value.trim().toLowerCase();const list=DB.produk.filter(p=>!p.dihapus&&p.aktif!==false&&cocokCari(p,q));$('#cmProduk',isi).innerHTML='<option value="">Pilih barang yang sesuai</option>'+list.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.nama)+' ('+esc(p.id)+') — stok '+rp(p.stok)+'</option>').join('');}
   $('#cmCari',isi).oninput=opsi;opsi();
   return modal({judul:'Cocokkan barang manual',isi,tombol:[{label:'Batal'},{label:'Simpan pencocokan',gaya:'p',aksi:()=>{
     if(!bolehAdmin())return false;
